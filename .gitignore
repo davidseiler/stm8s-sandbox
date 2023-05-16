@@ -42,6 +42,17 @@
 *.idb
 *.pdb
 
+# SDCC output
+*.asm
+*.ihx
+*.lk 
+*.lst
+*.map
+*.rel 
+*.rst 
+*.sym 
+
+
 # Kernel Module Compile Results
 *.mod*
 *.cmd
