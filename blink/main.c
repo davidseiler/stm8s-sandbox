@@ -13,7 +13,7 @@
 
 static inline void delay_ms(uint16_t ms) {
     uint32_t i;
-    for (i = 0; i < ((F_CPU / 18000UL) * ms); i++)  // 110 nop instructions per ms, TODO right now these feels like magic numbers but I have a feeling it is a magic number for a ballpark estimate of time. More accurate delays should use one of the TIMER's built into STM8
+    for (i = 0; i < ((F_CPU / 12000UL) * ms); i++)  // 110 nop instructions per ms, TODO right now these feels like magic numbers but I have a feeling it is a magic number for a ballpark estimate of time. More accurate delays should use one of the TIMER's built into STM8
         __asm__("nop");     // This is a feature of SDCC; you can put assembly instructions in C code
 }
 

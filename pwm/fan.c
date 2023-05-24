@@ -70,9 +70,9 @@ int putchar(int c) {
     return 0;
 }
 
-static inline void delay_ms(uint16_t ms) {  // TODO: 1000ms delay is in reality creating ~668ms of delay based on logic analyzer
+static inline void delay_ms(uint16_t ms) {
     uint32_t i;
-    for (i = 0; i < ((F_CPU / 18000UL) * ms); i++)  // 110 nop instructions per ms
+    for (i = 0; i < ((F_CPU / 12000UL) * ms); i++)  // 110 nop instructions per ms
         __asm__("nop");     // This is a feature of SDCC; you can put assembly instructions in C code
 }
 
