@@ -3,11 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define F_CPU 2000000UL     // this value is to calculate time based on clock cycles, it should be set to the clock speed of the MCU
+#define F_CPU 2000000UL   
 
 #define _SFR_(mem_addr)     (*(volatile uint8_t *)(0x5000 + (mem_addr))) // Macro function for calculating register locations. 0x5000 on the STM8 is the start of the registers
 
-/* UART */
+// UART 
 #define UART_SR     _SFR_(0x240)
 #define UART_TXE    7
 #define UART_TC     6
@@ -28,7 +28,6 @@
 #else
    #define PRINTF(...)    __asm__("nop")
 #endif
-
 
 // PortB
 #define PB_ODR      _SFR_(0x05)  
@@ -74,14 +73,14 @@ static inline void delay_us(uint16_t us) {      // minimum is 6us, delay will be
     }
 }
 
-static void send_zero() {
+static void write_zero() {
     PB_ODR &= ~(1 << ONE_WIRE_BUS);
     delay_us(60);
     PB_ODR |= (1 << ONE_WIRE_BUS);
     delay_us(6);
 }
 
-static void send_one() {
+static void write_one() {
     PB_ODR &= ~(1 << ONE_WIRE_BUS);
     delay_us(12);
     PB_ODR |= (1 << ONE_WIRE_BUS);
@@ -101,26 +100,35 @@ static uint8_t read_bit() {
     return res;    // 0x01 or 0x00
 }
 
-static inline uint8_t reset() {
-    // Send initilization pulse (pull down for min of 480us)
-    PB_ODR &= ~(1 << ONE_WIRE_BUS);    // pull down
-    delay_us(550);
+static inline void reset() {
+    while (1) {
+        // Send initilization pulse (pull down for min of 480us)
+        PB_ODR &= ~(1 << ONE_WIRE_BUS);    // pull down
+        delay_us(550);
 
-    PB_ODR |= (1 << ONE_WIRE_BUS);    // pull up
-    PB_DDR &= ~(1 << ONE_WIRE_BUS);   // enable as input
+        PB_ODR |= (1 << ONE_WIRE_BUS);    // pull up
+        PB_DDR &= ~(1 << ONE_WIRE_BUS);   // enable as input
 
-    delay_us(60);   // wait for one window for DS18B20 to respond
+        delay_us(60);   // wait for one window for DS18B20 to respond
 
-    return !(PB_IDR & (1 << ONE_WIRE_BUS));
+        if (!(PB_IDR & (1 << ONE_WIRE_BUS))) {
+            delay_us(430); // wait for the end of slave pulse
+            break;
+        } 
+        else {
+            PRINTF("ERROR: Temperature sensor not detected error\n");
+            delay_ms(500);
+        }         
+    }
 }
 
 static inline void write_byte(uint8_t data) {
     PB_DDR |= (1 << ONE_WIRE_BUS);
     for (int i = 0; i < 8; i++) {
         if ((data & (1 << i)) >> i) {
-            send_one();
+            write_one();
         } else {
-            send_zero();
+            write_zero();
         }
     }
 }
@@ -176,139 +184,116 @@ static uint8_t check_crc(uint8_t* data, uint8_t data_size) {    // CRC of zero i
             // Shift shift register
             crc >>= 1;
             crc |= next_bit << 7;
-
         }
     }
     return crc;
 }
 
+void searchROMs(uint8_t *buf) {
+    write_byte(0xF0);   // search ROM
+
+    // The general idea is to by the process of elimination is to get all 64 bits from the ROM at once
+    uint8_t conflict_flag = 0;
+    for (uint32_t i = NUM_SENSORS * 64; i >= 1 ; i--) {
+        // once the full 64 bits have been received reset and run again
+        if (i < (NUM_SENSORS * 64) && i % 64 == 0) {
+            reset();
+            write_byte(0xF0);       // search ROM
+        }
+        uint8_t position = 7 - ((i - 1) % 8);
+
+        // Read the next 2 bits
+        uint8_t b1 = read_bit();        // each sensor sends the LSB of its ROM code at once, resulting in a logical AND of all the bits            
+        uint8_t b2 = read_bit();        // each sensor sends the ~complement of its LSB of its rom code at once
+
+        // 00 -> indicates device conflict (there is a zero and a one in the position)
+        // 10 -> all devices have one in the current position
+        // 01 -> all devices have zero in the current position
+        // 11 -> impossible
+
+        // master writes either a one or a zero to select devices (0 selects devices with 0 at position and 1 selects devies with 1 at position). Once deselected reset required to make device respond.
+        if (b1 && !b2) {        // 10
+            write_one();
+            buf[(i - 1) / 8] |= (1 << position);
+        }
+        else if (!b1 && b2) {   // 01
+            write_zero();
+        }
+        else {                  // 00
+            // check the last successfully written ROM and write the opposite bit (this will start as zero)
+            // For each conflict check the last conflicts and choose the XOR of all the bit choices
+            for (uint8_t j = 0; j < NUM_SENSORS; j++) {
+                conflict_flag ^= ((buf[((i - 1) / 8) + ((8 * j) - 1)] & (1 << (position))) >> position);
+            }
+            if (conflict_flag) {
+                write_one();
+                buf[(i - 1) / 8] |= (1 << position);
+            } 
+            else {
+                write_zero();
+            }
+        }
+    }
+}
+
 void main() {
     #if USE_UART
-         uart_init();     // UART forces the device to reset once every 8.5 ms and I am not sure why
+         uart_init();
     #endif
-    // May 19th
-    // 12:13 wired up ds18b20 to 5v and common ground, pin 2 DQ (data line) is connected to A4/PB5 (i2c sda) 
-    // 12:45 setup port for 1-wire bus and configured for the recommended pullup
-    // 2:38 PM updated delay methods to match the actual timings, reset pulse and response from bus
-    // 4:27 PM reviewed bitwise operations and setup delay for determining DS18b20 responding
-    // 7:45 PM request rom serial number and store in memory 
-    // May 20th 
-    // 7:44 PM Bit banged temperature request 
-    // 8:33 PM functions for writing bytes
-    // 9:59 PM manual temperature fetch and conversion from bits to readable stuff
-    // May 22nd
-    // 9:50 AM: read bytes implemented 
-    // 9:15 PM: add uart toggle macros for easily turning uart off and on
-    // 9:42 PM: fixed bug of inconsistent RAM storing (was using calloc incorrectly)
-    // May 23rd
-    // 10:23 AM got test whole places working properly
-    // 10:52 AM fixed bytes going into the wrong place in memory, spaced by zeros
-    // 11:44 AM implemented manual 4 bit precision floating point printing
-    // 12:18 PM fixed byte ordering from read so that MSB is always correctly in front of LSB in memory
-    // 7:52 PM CRC generation and checking for the ROM and SCRATCHPAD reads
-    // 9:46 PM CRC verification on fresh breadboard configuration with line interrupts
-    // May 24
-    //
-
-    // TODO: next up setup multiple sensors (3) on the same circuit
-        // setup LCD control
-    
 
     // Setup PIN A4 for input/output for 1-wire bus
     PB_DDR |= (1 << ONE_WIRE_BUS);    // enable as output
     PB_CR1 |= (1 << ONE_WIRE_BUS);    // enable as push pull when output and pull up when input
     PB_ODR |= (1 << ONE_WIRE_BUS);    // pull up
 
-    uint8_t* rom_bytes = calloc(NUM_SENSORS * 8, sizeof(uint8_t));   // start of RAM
-    
-    // fetch the ROM's of all the devices on the bus
-    if (reset()) {      // Sensors responds
-        delay_us(430);;     // wait till end of slave pulse
-        // fetch temperature sensor serial number: Read ROM command (Ox33)
-        // *IMPORTANT tranport LSB first
-        write_byte(0x33);
+    // Fetch the ROM's of all the devices on the bus
+    uint8_t* rom_bytes = calloc(NUM_SENSORS * 8, sizeof(uint8_t));
+    reset();
+    searchROMs(rom_bytes);
 
-        // *IMPORTANT read LSB first
-        // read 64 bit serial number from the rom
-        
-        read_bytes(rom_bytes, 8);
-
-        // expected ROM serial numbers (from closest to STM8 on circuit to furthest)
-        // 0xc1a967770e64ff28
-        // 0xe29815740e64ff28
-        // 0x3f760e770e64ff28
-        PRINTF("\nROM SERIAL NUMBER: 0x"); 
-        for (uint8_t i = 0; i < NUM_SENSORS * 8; i++) {
-            PRINTF("%02x", rom_bytes[i]);
+    // expected ROM serial numbers (from closest to STM8 on circuit to furthest)
+    // 0xc1a967770e64ff28
+    // 0xe29815740e64ff28
+    // 0x3f760e770e64ff28
+    for (uint8_t i = 0; i < NUM_SENSORS; i++) {
+        PRINTF("\nROM%d SERIAL NUMBER: 0x", i); 
+        for (uint8_t j = 0; j < 8; j++) {
+            PRINTF("%02x", rom_bytes[j + i * 8]);
         }
-        PRINTF("\n");
-
-        PRINTF("CRC for ROM:%x\n", check_crc(rom_bytes, 8));
-        
-    } else {
-        // No DS18B20 temperature sensor was detected on the line
-        PRINTF("Temperature sensor not detected error\n");
+        PRINTF(" -> CRC check ROM%d:%x", i, check_crc(rom_bytes, 8));
     }
+    PRINTF("\n");
+    
+    // Convert and Fetch temperature from each sensor
+    reset();
+    
+    write_byte(0xCC);   // skip rom command: 0xCC
+    write_byte(0x44);   // Convert temperature request: 0x44
+    while(!read_bit()); // wait for sensor(s) to finish the temp conversion
 
-
-    // send convert temperature command
-    if (reset()) {
-        PB_DDR |= (1 << ONE_WIRE_BUS);  // set as output
-        delay_us(450);;     // wait till end of slave pulse
-        // skip rom command: 0xCC
-        write_byte(0xCC);
-
-        // Convert temperature request: 0x44
-        write_byte(0x44);   // ~30 ms with 12bit precision set on the sensor
-
-        while(!read_bit());        // wait for sensor to finish the conversion
-
+    // address each sensor and fetch temperature
+    for (uint8_t i = 0; i < NUM_SENSORS; i++) {
         reset();
         delay_us(450); // wait till end of slave pulse
+        write_byte(0x55);
+        write_byte(rom_bytes[(i * 8) + 7]);
+        write_byte(rom_bytes[(i * 8) + 6]);
+        write_byte(rom_bytes[(i * 8) + 5]);
+        write_byte(rom_bytes[(i * 8) + 4]);
+        write_byte(rom_bytes[(i * 8) + 3]);
+        write_byte(rom_bytes[(i * 8) + 2]);
+        write_byte(rom_bytes[(i * 8) + 1]);
+        write_byte(rom_bytes[(i * 8) + 0]);
 
-        // skip rom command
-        write_byte(0xCC);
-
-        // read scratch pad: 0xBE
-        write_byte(0xBE);   // this will return 85 degrees if no values set
+        write_byte(0xBE);   // read scratch pad: 0xBE
 
         uint8_t* scratchpad = calloc(9, sizeof(uint8_t));
         read_bytes(scratchpad, 9);
 
         PRINTF("CRC for SCRATCHPAD:%x\n", check_crc(scratchpad, 9));
         
-        print_buf(scratchpad, 9);
         print_temp(&(scratchpad[7]));
-
         free(scratchpad);
-
-        // temperature display testing
-        // uint8_t* test = calloc(2, sizeof(uint8_t));
-
-        // // -25.0625
-        // test[1] = 0b01101111;
-        // test[0] = 0b11111110;
-
-        // 25.0625
-        // test[1] = 0b10010001;
-        // test[0] = 0b00000001;
-
-        // 10.125
-        // test[1] = 0b10100010;
-        // test[0] = 0b00000000;
-
-        // 125
-        // test[1] = 0b11010000;
-        // test[0] = 0b00000111;
-
-        // 85
-        // test[1] = 0b01010000;
-        // test[0] = 0b00000101;
-        // uint16_t test =  // -25.0625//0b0101000000000101;   
-        // print_buf(test, 2);
-        // print_temp(test);
-        // free(test);    
     }
-
     free(rom_bytes);
 }
