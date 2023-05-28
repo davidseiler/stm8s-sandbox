@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "lcd1602-8.h"
+
 #define F_CPU 2000000UL   
 
 #define _SFR_(mem_addr)     (*(volatile uint8_t *)(0x5000 + (mem_addr))) // Macro function for calculating register locations. 0x5000 on the STM8 is the start of the registers
@@ -29,12 +31,12 @@
    #define PRINTF(...)    __asm__("nop")
 #endif
 
-// PortB
-#define PB_ODR      _SFR_(0x05)  
-#define PB_IDR      _SFR_(0x06)
-#define PB_DDR      _SFR_(0x07)    
-#define PB_CR1      _SFR_(0x08)     
-#define PB_CR2      _SFR_(0x09)
+// Port E
+#define PE_ODR      _SFR_(0x14)  
+#define PE_IDR      _SFR_(0x15)
+#define PE_DDR      _SFR_(0x16)    
+#define PE_CR1      _SFR_(0x17)     
+#define PE_CR2      _SFR_(0x18)
 #define ONE_WIRE_BUS    5
 
 #define NUM_SENSORS 3
@@ -74,28 +76,28 @@ static inline void delay_us(uint16_t us) {      // minimum is 6us, delay will be
 }
 
 static void write_zero() {
-    PB_ODR &= ~(1 << ONE_WIRE_BUS);
+    PE_ODR &= ~(1 << ONE_WIRE_BUS);
     delay_us(60);
-    PB_ODR |= (1 << ONE_WIRE_BUS);
+    PE_ODR |= (1 << ONE_WIRE_BUS);
     delay_us(6);
 }
 
 static void write_one() {
-    PB_ODR &= ~(1 << ONE_WIRE_BUS);
+    PE_ODR &= ~(1 << ONE_WIRE_BUS);
     delay_us(12);
-    PB_ODR |= (1 << ONE_WIRE_BUS);
+    PE_ODR |= (1 << ONE_WIRE_BUS);
     delay_us(56);   // must be at least 1 us between messages and delay_us is 6 us minimum
 }
 
 static uint8_t read_bit() {
     // pull low for one clock to enable read slot
-    PB_ODR &= ~(1 << ONE_WIRE_BUS);
+    PE_ODR &= ~(1 << ONE_WIRE_BUS);
     delay_us(6);     // Sometimes the delay is only 0.5 us when it is required to be at least 1 us, works without this just gives a warning. 2 nops may be enough
-    PB_ODR |= (1 << ONE_WIRE_BUS);
-    PB_DDR &= ~(1 << ONE_WIRE_BUS);     // enable as input
+    PE_ODR |= (1 << ONE_WIRE_BUS);
+    PE_DDR &= ~(1 << ONE_WIRE_BUS);     // enable as input
     delay_us(12);   // sample within the first 15 us
-    uint8_t res = ((PB_IDR & (1 << ONE_WIRE_BUS)) >> ONE_WIRE_BUS);
-    PB_DDR |= (1 << ONE_WIRE_BUS);
+    uint8_t res = ((PE_IDR & (1 << ONE_WIRE_BUS)) >> ONE_WIRE_BUS);
+    PE_DDR |= (1 << ONE_WIRE_BUS);
     delay_us(56);
     return res;    // 0x01 or 0x00
 }
@@ -103,15 +105,15 @@ static uint8_t read_bit() {
 static inline void reset() {
     while (1) {
         // Send initilization pulse (pull down for min of 480us)
-        PB_ODR &= ~(1 << ONE_WIRE_BUS);    // pull down
+        PE_ODR &= ~(1 << ONE_WIRE_BUS);    // pull down
         delay_us(550);
 
-        PB_ODR |= (1 << ONE_WIRE_BUS);    // pull up
-        PB_DDR &= ~(1 << ONE_WIRE_BUS);   // enable as input
+        PE_ODR |= (1 << ONE_WIRE_BUS);    // pull up
+        PE_DDR &= ~(1 << ONE_WIRE_BUS);   // enable as input
 
         delay_us(60);   // wait for one window for DS18B20 to respond
 
-        if (!(PB_IDR & (1 << ONE_WIRE_BUS))) {
+        if (!(PE_IDR & (1 << ONE_WIRE_BUS))) {
             delay_us(430); // wait for the end of slave pulse
             break;
         } 
@@ -123,7 +125,7 @@ static inline void reset() {
 }
 
 static inline void write_byte(uint8_t data) {
-    PB_DDR |= (1 << ONE_WIRE_BUS);
+    PE_DDR |= (1 << ONE_WIRE_BUS);
     for (int i = 0; i < 8; i++) {
         if ((data & (1 << i)) >> i) {
             write_one();
@@ -164,6 +166,23 @@ static void print_temp(uint8_t* temp_bytes) {       // only the first 2 bytes wi
     if (floating & 0b00000001) decimal += 625;
 
     PRINTF("%d.%04d degrees Celsius\n", whole, decimal);
+}
+
+void temp_to_string(uint8_t* temp_bytes, char* buf) {
+    // For now assume the default 12 bit precision
+    int8_t whole = (((temp_bytes[1] & 0b11110000) >> 4) | ((temp_bytes[0] & 0b00001111) << 4));
+    if (temp_bytes[0] >> 7 == 1) whole += 1;    // negative number
+    
+    // manual 4 bit precision floating point
+    uint8_t floating = ((temp_bytes[1] & 0b00001111));
+    uint16_t decimal = 0;
+
+    if ((floating & 0b00001000) >> 3) decimal += 5000;
+    if ((floating & 0b00000100) >> 2) decimal += 2500;
+    if ((floating & 0b00000010) >> 1) decimal += 1250;
+    if (floating & 0b00000001) decimal += 625;
+
+    sprintf(buf, "%4d.%04d", whole, decimal);
 }
 
 static uint8_t check_crc(uint8_t* data, uint8_t data_size) {    // CRC of zero is a successful message
@@ -236,15 +255,70 @@ void searchROMs(uint8_t *buf) {
     }
 }
 
+void monitor_temp(uint8_t* rom_bytes, uint16_t frequency_ms) {
+    while(1) {
+        // Convert and Fetch temperature from each sensor
+        reset();
+        
+        write_byte(0xCC);   // skip rom command: 0xCC
+        write_byte(0x44);   // Convert temperature request: 0x44
+
+        uint8_t* scratchpad = calloc(9 * NUM_SENSORS, sizeof(uint8_t));
+        while(!read_bit()); // wait for sensor(s) to finish the temp conversion
+
+        // address each sensor and fetch temperature
+        for (uint8_t i = 0; i < NUM_SENSORS; i++) {
+            reset();
+            delay_us(450); // wait till end of slave pulse
+            write_byte(0x55);
+            write_byte(rom_bytes[(i * 8) + 7]);
+            write_byte(rom_bytes[(i * 8) + 6]);
+            write_byte(rom_bytes[(i * 8) + 5]);
+            write_byte(rom_bytes[(i * 8) + 4]);
+            write_byte(rom_bytes[(i * 8) + 3]);
+            write_byte(rom_bytes[(i * 8) + 2]);
+            write_byte(rom_bytes[(i * 8) + 1]);
+            write_byte(rom_bytes[(i * 8) + 0]);
+
+            write_byte(0xBE);   // read scratch pad: 0xBE
+
+            
+            read_bytes(scratchpad + (i * 9), 9);
+
+            PRINTF("CRC for SCRATCHPAD:%x\n", check_crc(scratchpad + (i * 9), 9));
+            
+            print_temp((scratchpad + (i * 9) + 7));
+        }
+        // Display temp values
+        char t1[9];
+        char t2[9];
+        char t3[9];
+        temp_to_string((scratchpad + 7), t1);
+        temp_to_string((scratchpad + 9 + 7), t2);
+        temp_to_string((scratchpad + 18 + 7), t3);
+
+        LCD_clear();
+        char temps[36];
+        sprintf(temps, "t1:%.5s%cC t2:%.5s%cC t3:%.5s%cC", t1 + 2, 0xDF, t2 + 2, 0xDF, t3 + 2, 0xDF);
+        LCD_write_16_2(temps, 0);
+
+        free(scratchpad);
+        delay_ms(frequency_ms);
+    }
+        
+}
+
 void main() {
     #if USE_UART
          uart_init();
     #endif
+    
+    LCD_init();
 
     // Setup PIN A4 for input/output for 1-wire bus
-    PB_DDR |= (1 << ONE_WIRE_BUS);    // enable as output
-    PB_CR1 |= (1 << ONE_WIRE_BUS);    // enable as push pull when output and pull up when input
-    PB_ODR |= (1 << ONE_WIRE_BUS);    // pull up
+    PE_DDR |= (1 << ONE_WIRE_BUS);    // enable as output
+    PE_CR1 |= (1 << ONE_WIRE_BUS);    // enable as push pull when output and pull up when input
+    PE_ODR |= (1 << ONE_WIRE_BUS);    // pull up
 
     // Fetch the ROM's of all the devices on the bus
     uint8_t* rom_bytes = calloc(NUM_SENSORS * 8, sizeof(uint8_t));
@@ -264,36 +338,6 @@ void main() {
     }
     PRINTF("\n");
     
-    // Convert and Fetch temperature from each sensor
-    reset();
-    
-    write_byte(0xCC);   // skip rom command: 0xCC
-    write_byte(0x44);   // Convert temperature request: 0x44
-    while(!read_bit()); // wait for sensor(s) to finish the temp conversion
-
-    // address each sensor and fetch temperature
-    for (uint8_t i = 0; i < NUM_SENSORS; i++) {
-        reset();
-        delay_us(450); // wait till end of slave pulse
-        write_byte(0x55);
-        write_byte(rom_bytes[(i * 8) + 7]);
-        write_byte(rom_bytes[(i * 8) + 6]);
-        write_byte(rom_bytes[(i * 8) + 5]);
-        write_byte(rom_bytes[(i * 8) + 4]);
-        write_byte(rom_bytes[(i * 8) + 3]);
-        write_byte(rom_bytes[(i * 8) + 2]);
-        write_byte(rom_bytes[(i * 8) + 1]);
-        write_byte(rom_bytes[(i * 8) + 0]);
-
-        write_byte(0xBE);   // read scratch pad: 0xBE
-
-        uint8_t* scratchpad = calloc(9, sizeof(uint8_t));
-        read_bytes(scratchpad, 9);
-
-        PRINTF("CRC for SCRATCHPAD:%x\n", check_crc(scratchpad, 9));
-        
-        print_temp(&(scratchpad[7]));
-        free(scratchpad);
-    }
+    monitor_temp(rom_bytes, 500);
     free(rom_bytes);
 }

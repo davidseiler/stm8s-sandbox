@@ -142,13 +142,12 @@ void LCD_write(char* data, uint8_t size, uint16_t display_speed_ms) {
     }
 }
 
-void LCD_write_full(char data[32], uint16_t display_speed_ms) {
+void LCD_write_16_2(char data[32], uint16_t display_speed_ms) {
     LCD_init();
     delay_ms(10);
     for (uint8_t i = 0; i < 32; i++) {
         if (i == 16) { 
-            // LCD_write(0x00, 24, display_speed_ms);   // pad with garbage from the top of RAM
-            // Set address to next line 0x40: 001
+            // Set address to next line 0x40
             PC_ODR &= ~(1 << RS_PIN);
             PC_ODR &= ~(1 << RW_PIN);
             set_data_byte(0b11000000);
@@ -160,11 +159,11 @@ void LCD_write_full(char data[32], uint16_t display_speed_ms) {
     }
 }
 
-void main() {
-    LCD_init();
-    char data[32] = "11111111111111112222222222222222";
-    LCD_write_full(data, 0);
-    LCD_clear();
-    delay_ms(500);
-    LCD_write_full(data, 0);
-}
+// void main() {
+//     LCD_init();
+//     char data[32] = "11111111111111112222222222222222";
+//     LCD_write_full(data, 0);
+//     LCD_clear();
+//     delay_ms(500);
+//     LCD_write_full(data, 0);
+// }
