@@ -16,6 +16,7 @@ D5 -> PB5
 D6 -> PF4 (A6)
 D7 -> PC5
 */
+
 #define F_CPU 2000000UL   
 #define _SFR_(mem_addr)     (*(volatile uint8_t *)(0x5000 + (mem_addr))) // Macro function for calculating register locations. 0x5000 on the STM8 is the start of the registers
 
@@ -43,9 +44,6 @@ D7 -> PC5
 #define PF_CR1      _SFR_(0x1C)     
 #define PF_CR2      _SFR_(0x1D)
 
-// Display settings
-#define DISPLAY_SPEED 500
-
 
 static inline void delay_ms(uint16_t ms) {
     uint32_t i;
@@ -68,19 +66,7 @@ static inline void set_data_byte(uint8_t data) {
     PC_ODR |= ((data >> 7) << 5);
 }
 
-void write_line(char* data, uint8_t size) {
-    for (uint8_t i = 0; i < size; i++) {
-        // Write data to CGRAM/DDRAM
-        PC_ODR |= (1 << RS_PIN);
-        PC_ODR &= ~(1 << RW_PIN);
-        set_data_byte(data[i]);
-        PC_ODR |= (1 << E_PIN);
-        PC_ODR &= ~(1 << E_PIN);
-        delay_ms(DISPLAY_SPEED);
-    }
-}
-
-void init_lcd() {
+void LCD_init() {
 // Setup Ports
     PB_DDR |= 0b00111111;     // set as output
     PB_CR1 |= 0b00111111;     // enable as push pull
@@ -127,7 +113,58 @@ void init_lcd() {
     delay_ms(2);
 }
 
+void LCD_clear() {
+    // clear display 0000000001
+    PC_ODR &= ~(1 << RS_PIN);
+    PC_ODR &= ~(1 << RW_PIN);
+    set_data_byte(0b00000001);
+    PC_ODR |= (1 << E_PIN);
+    PC_ODR &= ~(1 << E_PIN);
+    delay_ms(2);    // max lcd instruction time
+}
+
+
+void LCD_write_character(char c, uint16_t display_speed_ms) {
+    // Write data to CGRAM/DDRAM
+    PC_ODR |= (1 << RS_PIN);
+    PC_ODR &= ~(1 << RW_PIN);
+    set_data_byte(c);
+    PC_ODR |= (1 << E_PIN);
+    PC_ODR &= ~(1 << E_PIN);
+    delay_ms(2);
+    delay_ms(display_speed_ms);
+}
+
+void LCD_write(char* data, uint8_t size, uint16_t display_speed_ms) {
+    for (uint8_t i = 0; i < size; i++) {
+        // Write data to CGRAM/DDRAM
+        LCD_write_character(data[i], display_speed_ms);
+    }
+}
+
+void LCD_write_full(char data[32], uint16_t display_speed_ms) {
+    LCD_init();
+    delay_ms(10);
+    for (uint8_t i = 0; i < 32; i++) {
+        if (i == 16) { 
+            // LCD_write(0x00, 24, display_speed_ms);   // pad with garbage from the top of RAM
+            // Set address to next line 0x40: 001
+            PC_ODR &= ~(1 << RS_PIN);
+            PC_ODR &= ~(1 << RW_PIN);
+            set_data_byte(0b11000000);
+            PC_ODR |= (1 << E_PIN);
+            PC_ODR &= ~(1 << E_PIN);
+            delay_ms(2);
+        }
+        LCD_write_character(data[i], display_speed_ms);
+    }
+}
+
 void main() {
-    init_lcd();
-    write_line("Hello, World!", 13);
+    LCD_init();
+    char data[32] = "11111111111111112222222222222222";
+    LCD_write_full(data, 0);
+    LCD_clear();
+    delay_ms(500);
+    LCD_write_full(data, 0);
 }
