@@ -52,6 +52,8 @@
 *.rst 
 *.sym 
 
+build*
+
 
 # Kernel Module Compile Results
 *.mod*
